@@ -1,0 +1,10 @@
+constriction
+numpy
+pandas
+pillow
+pytorch-msssim
+PyYAML
+scikit-learn
+scipy
+tqdm
+vector-quantize-pytorch
