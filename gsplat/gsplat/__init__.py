@@ -7,7 +7,7 @@ from .project_gaussians_2d_covariance import project_gaussians_2d_covariance  # 
 from .project_gaussians_2d_scale_rot import project_gaussians_2d_scale_rot
 from .rasterize_sum import rasterize_gaussians_sum
 from .rasterize_sum_plus import rasterize_gaussians_plus
-from .rasterize_sum_gabor import rasterize_gabor_plus
+from .rasterize_sum_gabor import rasterize_gabor_plus, rasterize_gabor_sum
 
 from .utils import (
     map_gaussian_to_intersects,
@@ -29,6 +29,7 @@ __all__ = [
     "project_gaussians_2d_covariance", 
     "rasterize_gaussians",
     "rasterize_gaussians_sum",
+    "rasterize_gabor_sum",
     "spherical_harmonics",
     # utils
     "bin_and_sort_gaussians",

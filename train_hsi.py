@@ -15,7 +15,6 @@ from pytorch_msssim import ssim
 import yaml
 from tqdm import tqdm
 
-from endmember import nmf_initialization
 from hsi_utils import compute_sam, list_available_datasets, load_dataset
 from models.gaussianimage_covariance_hsi import GaussianImage_Covariance_HSI
 from models.gaussianimage_cholesky_hsi import GaussianImage_Cholesky_HSI
@@ -28,11 +27,8 @@ _MODEL_CLASSES = {
 
 class HSIFullTrainer:
     def __init__(self, args, dataset_name: str, experiment_root: Path):
-        if not torch.cuda.is_available():
-            raise RuntimeError("HSI fitting requires CUDA-enabled PyTorch and the compiled gsplat CUDA extension.")
-
         self.args = args
-        self.device = torch.device("cuda:0")
+        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.dataset_name = dataset_name.lower()
         self.experiment_root = experiment_root
 
@@ -43,18 +39,6 @@ class HSIFullTrainer:
         gt = torch.as_tensor(cube_hwc, dtype=torch.float32, device=self.device)
         gt = gt.unsqueeze(0).permute(0, 3, 1, 2).contiguous()
         self.gt_image = torch.clamp(gt, 0, 1)
-
-        if getattr(args, "no_nmf", False):
-            # Ablation: skip NMF decomposition. Render the C spectral
-            # channels directly via 3/4-channel rendering groups; endmember
-            # is identity so reconstruction equals the rendered abundance.
-            self.rank = int(self.C)
-            E0 = np.eye(self.rank, self.C, dtype=np.float32)
-            self._effective_freeze_endmember = True
-        else:
-            E0, _ = nmf_initialization(self.gt_image, args.rank)
-            self.rank = int(E0.shape[0])
-            self._effective_freeze_endmember = args.freeze_endmember
 
         self.log_dir = self._build_log_dir()
         self.log_dir.mkdir(parents=True, exist_ok=True)
@@ -68,12 +52,7 @@ class HSIFullTrainer:
             num_points=args.num_points,
             H=self.H,
             W=self.W,
-            rank=self.rank,
             C=self.C,
-            E0=E0,
-            lora_rank=args.lora_rank,
-            lora_alpha=args.lora_alpha,
-            freeze_endmember=self._effective_freeze_endmember,
             BLOCK_H=block_h,
             BLOCK_W=block_w,
             device=self.device,
@@ -105,7 +84,7 @@ class HSIFullTrainer:
         # Match the model's init scheme (inverse_softplus(0.05) + jitter) so newly
         # densified points start near abundance=0.05 instead of softplus(0)=0.69.
         n = int(sampled_xy.shape[0])
-        clamped = torch.full((n, self.rank), 0.05, dtype=torch.float32, device=self.device)
+        clamped = torch.full((n, self.C), 0.05, dtype=torch.float32, device=self.device)
         clamped = torch.clamp(clamped, min=1e-6)
         feat = torch.log(torch.expm1(clamped))
         feat = feat + 0.01 * torch.randn_like(feat)
@@ -183,8 +162,6 @@ class HSIFullTrainer:
         with torch.no_grad():
             outputs = self.model(H=self.H, W=self.W)
             reconstruction = outputs["render"]
-            abundance = outputs["abundance"]
-            endmember = outputs["endmember"]
 
         mse = F.mse_loss(reconstruction, self.gt_image).item()
         psnr = 10 * math.log10(1.0 / max(mse, 1e-12))
@@ -197,8 +174,6 @@ class HSIFullTrainer:
             "sam": sam,
             "mse": mse,
             "reconstruction": pred_hwc,
-            "abundance": abundance.squeeze(0).permute(1, 2, 0).detach().cpu().numpy(),
-            "endmember": endmember.detach().cpu().numpy(),
         }
 
     def save_results(self, best_state_dict, metrics):
@@ -207,7 +182,6 @@ class HSIFullTrainer:
             {
                 "gs": best_state_dict,
                 "num_gs": int(best_state_dict["_xyz"].shape[0]),
-                "rank": self.rank,
                 "spectral_channels": self.C,
                 "metrics": {
                     "psnr": metrics["psnr"],
@@ -220,9 +194,6 @@ class HSIFullTrainer:
         )
 
         np.save(self.log_dir / "reconstruction.npy", metrics["reconstruction"].astype(np.float32))
-        np.save(self.log_dir / "abundance.npy", metrics["abundance"].astype(np.float32))
-        np.save(self.log_dir / "endmember.npy", metrics["endmember"].astype(np.float32))
-        np.save(self.log_dir / "endmember_init.npy", self.model.E0.detach().cpu().numpy().astype(np.float32))
 
         with open(self.log_dir / "metrics.json", "w", encoding="utf-8") as fp:
             json.dump(
@@ -252,7 +223,7 @@ class HSIFullTrainer:
         start_time = time.time()
 
         for iteration in range(1, self.args.iterations + 1):
-            loss, psnr, out_image, recon_loss, delta_norm = self.model.train_iter(
+            loss, psnr, out_image, recon_loss = self.model.train_iter(
                 self.H,
                 self.W,
                 self.gt_image,
@@ -297,7 +268,6 @@ class HSIFullTrainer:
                             "recon": f"{recon_loss.item():.6f}",
                             "psnr": f"{psnr:.4f}",
                             "best": f"{best_psnr:.4f}",
-                            "deltaE": f"{delta_norm:.4f}",
                             "num": f"{self.model.cur_num_points}",
                             "pruned": f"{last_pruned}",
                             "added": f"{last_added}",
@@ -324,10 +294,6 @@ def parse_args(argv=None):
     parser.add_argument('--dataset', type=str, default='all',
                         help="Dataset name or 'all': Urban | Salinas | JasperRidge | PaviaU | all")
     parser.add_argument("--output_root", type=str, default="./checkpoints_his")
-    parser.add_argument("--rank", type=int, default=8, help="NMF rank / abundance channels")
-    parser.add_argument("--lora_rank", type=int, default=2, help="LoRA rank for endmember correction")
-    parser.add_argument("--lora_alpha", type=float, default=0.1, help="Maximum endmember correction scale")
-    parser.add_argument("--freeze_endmember", action="store_true", help="Use E0 directly without LoRA correction")
     parser.add_argument("--iterations", type=int, default=50000)
     parser.add_argument("--prune_iter", type=int, default=100)
     parser.add_argument("--grow_iter", type=int, default=5000)
@@ -355,8 +321,6 @@ def parse_args(argv=None):
     parser.add_argument("--xy_bit", type=int, default=12)
     parser.add_argument("--cov_bit", type=int, default=10)
     parser.add_argument("--color_bit", type=int, default=6)
-    parser.add_argument("--no_nmf", action="store_true",
-                        help="Ablation: skip NMF; render C spectral channels directly")
     parser.add_argument("--SLV_init", action="store_true", default=True,
                         help="Enable per-point dynamic Cholesky low-pass bound (recommended).")
     parser.add_argument("--no_SLV_init", dest="SLV_init", action="store_false",
@@ -368,17 +332,10 @@ def parse_args(argv=None):
 
 
 def _build_experiment_root(args) -> Path:
-    if getattr(args, "no_nmf", False):
-        endmember_tag = "noNMF"
-    else:
-        endmember_tag = "freezeE" if args.freeze_endmember else f"lora{args.lora_rank}_a{args.lora_alpha}"
     cov_tag = args.covariance_type
     prune_tag = "pruneOff" if not args.prune else f"prune{args.prune_iter}"
     add_tag = "addOff" if not args.adaptive_add else f"add{args.grow_iter}_max{args.max_num_points}"
-    run_tag = (
-        f"rank{args.rank}_{endmember_tag}_g{args.num_gabor}_pts{args.num_points}_"
-        f"{prune_tag}_{add_tag}_{cov_tag}"
-    )
+    run_tag = f"g{args.num_gabor}_pts{args.num_points}_{prune_tag}_{add_tag}_{cov_tag}"
     root = Path(args.output_root) / run_tag
     root.mkdir(parents=True, exist_ok=True)
     return root
