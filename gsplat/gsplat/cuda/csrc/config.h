@@ -3,7 +3,11 @@
 #define BLOCK_SIZE (BLOCK_X * BLOCK_Y)
 #define N_THREADS 256
 
-#define MAX_REGISTER_CHANNELS 16
+#define NUM_CHANNELS 3 // Default 3, RGB
+#define NUM_OBJECTS 16 // Default 16, identity encoding
+
+
+#define MAX_REGISTER_CHANNELS 12
 
 #define CUDA_CALL(x)                                                           \
     do {                                                                       \

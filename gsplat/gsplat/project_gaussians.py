@@ -110,7 +110,7 @@ class _ProjectGaussians(Function):
             num_points,
             means3d,
             scales,
-            glob_scale,
+            glob_scale,# 1
             quats,
             viewmat,
             projmat,

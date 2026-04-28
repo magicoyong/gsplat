@@ -120,6 +120,10 @@ def rasterize_gabor_sum(
     )
 
 
+def rasterize_gabor_plus(*args, **kwargs):
+    return rasterize_gabor_sum(*args, **kwargs)
+
+
 class RasterizeGaborSum(Function):
     """Rasterizes 2D gaussians with Gabor filter modulation"""
 

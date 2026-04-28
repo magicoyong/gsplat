@@ -16,6 +16,8 @@ def project_gaussians_2d(
     img_width: int,
     tile_bounds: Tuple[int, int, int],
     clip_thresh: float = 0.01,
+     radius_clip: float = 1.0,
+    isprint: bool = False
 ) -> Tuple[Tensor, Tensor, Tensor, Tensor, int]:
     """This function projects 3D gaussians to 2D using the EWA splatting method for gaussian splatting.
 
@@ -54,6 +56,8 @@ def project_gaussians_2d(
         img_width,
         tile_bounds,
         clip_thresh,
+        radius_clip,
+        isprint
     )
 
 class _ProjectGaussians2d(Function):
@@ -68,6 +72,8 @@ class _ProjectGaussians2d(Function):
         img_width: int,
         tile_bounds: Tuple[int, int, int],
         clip_thresh: float = 0.01,
+         radius_clip: float = 2.0,
+         isprint: bool = False
     ):
         num_points = means2d.shape[-2]
 
@@ -79,12 +85,15 @@ class _ProjectGaussians2d(Function):
             num_tiles_hit,
         ) = _C.project_gaussians_2d_forward(
             num_points,
+            3.0,
             means2d,
             L_elements,
             img_height,
             img_width,
             tile_bounds,
             clip_thresh,
+            radius_clip,
+            isprint
         )
 
         # Save non-tensors.
@@ -94,7 +103,7 @@ class _ProjectGaussians2d(Function):
 
         # Save tensors.
         ctx.save_for_backward(
-            means2d,
+            means2d,#-1-1
             L_elements,
             radii,
             conics,
@@ -122,6 +131,7 @@ class _ProjectGaussians2d(Function):
             v_xys,
             v_depths,
             v_conics,
+
         )
 
         # Return a gradient for each input.
@@ -138,4 +148,6 @@ class _ProjectGaussians2d(Function):
             None,
             # clip_thresh,
             None,
+            None,
+            None
         )

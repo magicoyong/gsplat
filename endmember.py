@@ -1,15 +1,46 @@
+"""
+Endmember initialization via NMF.
+
+Provides two entry points:
+  1. masked_nmf_initialization — uses only masked (observed) HSI pixels.
+     Missing positions are filled differently depending on mask type:
+       - elementwise: per-pixel spectral mean (observed bands → missing bands);
+         fully-missing pixels fall back to local spatial same-band mean.
+       - random / pixel-wise: local spatial same-band mean from neighbouring
+         observed pixels (expanding window); global per-band mean only as
+         last-resort fallback.
+     This is the ONLY path that should be used for HSI inpainting.
+  2. (legacy) nmf_initialization — uses full GT HSI.  DEPRECATED for
+     inpainting because it leaks test information.
+"""
+
 import argparse
 import numpy as np
 import scipy.io
 from sklearn.decomposition import NMF
+from scipy.ndimage import uniform_filter
 import time
 import os
 
+
+# ── canonical name map shared by all functions ──────────────────────────
+_NAME_MAP = {
+    "urban": "Urban",
+    "salinas": "Salinas",
+    "jasperridge": "JR",
+    "paviau": "PaviaU",
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Legacy full-GT NMF  (DEPRECATED for inpainting)
+# ─────────────────────────────────────────────────────────────────────────
+
 def load_dataset(name):
-    """Load and normalize hyperspectral dataset."""
+    """Load and normalize hyperspectral dataset.  Returns (C, H*W)."""
     name = name.lower()
     if name == "salinas":
-        data = scipy.io.loadmat("HSI/data/Salinas_crop.mat")['I'].astype(float)
+        data = scipy.io.loadmat("HSI/data/Salinas_crop.mat")['salinas'].astype(float)
         data = np.clip(data, 0, None)
         for i in range(204):
             data[:, :, i] /= np.max(data[:, :, i])
@@ -30,20 +61,16 @@ def load_dataset(name):
         data = data[-340:, :, :]
     else:
         raise ValueError(f"Unknown dataset: {name}")
-
-    # (C, H, W) → (C, H*W)
     data = np.transpose(data, (2, 0, 1)).reshape(data.shape[2], -1)
     return data
 
-
-def nmf_initialization(I, rank, dataset_name=None):
-    """Perform NMF initialization from a tensor/array in CHW, HWC, BCHW, or (C, H*W) format."""
+def nmf_initialization(I, rank):
     if hasattr(I, "detach"):
         I = I.detach().float().cpu()
         if I.dim() == 4 and I.shape[0] == 1:
             I = I.squeeze(0).reshape(I.shape[1], -1)
-        elif I.dim() == 3:
-            if I.shape[0] <= I.shape[1] and I.shape[0] <= I.shape[2]:
+        if I.dim() == 3:
+            if I.shape[0] <= I.shape[-1] and I.shape[0] <= I.shape[1]:
                 I = I.reshape(I.shape[0], -1)
             else:
                 I = I.permute(2, 0, 1).reshape(I.shape[-1], -1)
@@ -52,17 +79,13 @@ def nmf_initialization(I, rank, dataset_name=None):
         I = np.asarray(I)
         if I.ndim == 4 and I.shape[0] == 1:
             I = I.squeeze(0).reshape(I.shape[1], -1)
-        elif I.ndim == 3:
-            if I.shape[0] <= I.shape[1] and I.shape[0] <= I.shape[2]:
+        if I.ndim == 3:
+            if I.shape[0] <= I.shape[-1] and I.shape[0] <= I.shape[1]:
                 I = I.reshape(I.shape[0], -1)
             else:
                 I = np.transpose(I, (2, 0, 1)).reshape(I.shape[-1], -1)
-
-    if dataset_name is not None:
-        print(f"Running NMF initialization on {dataset_name} with rank={rank}")
-
+    I = I.copy()
     nmf = NMF(rank, init='random', random_state=42, max_iter=12000)
-    endmember = nmf.fit_transform(I).T  # shape (rank, channels)
-    abundance = nmf.components_.T       # shape (H*W, rank)
-
-    return endmember.astype(np.float32), abundance.astype(np.float32)
+    endmember = nmf.fit_transform(I).T
+    abundance = nmf.components_.T
+    return endmember.astype(np.float32), abundance.astype(np.float32) 

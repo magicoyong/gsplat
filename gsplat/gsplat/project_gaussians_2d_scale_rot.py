@@ -17,6 +17,9 @@ def project_gaussians_2d_scale_rot(
     img_width: int,
     tile_bounds: Tuple[int, int, int],
     clip_thresh: float = 0.01,
+     coords_norm: bool = False,
+     radius_clip: float = 1.0,
+    isprint: bool = False
 ) -> Tuple[Tensor, Tensor, Tensor, Tensor, int]:
     """This function projects 3D gaussians to 2D using the EWA splatting method for gaussian splatting.
 
@@ -48,14 +51,17 @@ def project_gaussians_2d_scale_rot(
         - **conics** (Tensor): conic parameters for 2D gaussian.
         - **num_tiles_hit** (Tensor): number of tiles hit per gaussian.
     """
+
     return _ProjectGaussians2dScaleRot.apply(
-        means2d.contiguous(),
+        means2d.contiguous(), 
         scales2d.contiguous(),
         rotation.contiguous(),
         img_height,
         img_width,
         tile_bounds,
         clip_thresh,
+        radius_clip,
+        isprint
     )
 
 class _ProjectGaussians2dScaleRot(Function):
@@ -71,6 +77,8 @@ class _ProjectGaussians2dScaleRot(Function):
         img_width: int,
         tile_bounds: Tuple[int, int, int],
         clip_thresh: float = 0.01,
+         radius_clip: float = 2.0,
+         isprint: bool = False
     ):
         num_points = means2d.shape[-2]
         if num_points < 1 or means2d.shape[-1] != 2:
@@ -83,6 +91,7 @@ class _ProjectGaussians2dScaleRot(Function):
             num_tiles_hit,
         ) = _C.project_gaussians_2d_scale_rot_forward(
             num_points,
+            3.0,
             means2d,
             scales2d,
             rotation,
@@ -90,6 +99,8 @@ class _ProjectGaussians2dScaleRot(Function):
             img_width,
             tile_bounds,
             clip_thresh,
+            radius_clip,
+            isprint
         )
 
         # Save non-tensors.
@@ -106,7 +117,7 @@ class _ProjectGaussians2dScaleRot(Function):
             conics,
         )
 
-        return (xys, depths, radii, conics, num_tiles_hit)
+        return (xys,  depths, radii, conics, num_tiles_hit)
 
     @staticmethod
     def backward(ctx, v_xys, v_depths, v_radii, v_conics, v_num_tiles_hit):
@@ -148,4 +159,8 @@ class _ProjectGaussians2dScaleRot(Function):
             None,
             # clip_thresh,
             None,
+            # radius_clip,
+            None,
+            None
         )
+

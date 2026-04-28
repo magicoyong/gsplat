@@ -1,4 +1,41 @@
-# LoR-SGS: Hyperspectral Image Compression via Low-rank Spectral Gaussian Splatting
+# GaussianImage++: Boosted Image Representation and Compression with 2D Gaussian Splatting
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0) 
+[![arXiv](https://img.shields.io/badge/GaussianImage_plus-2512.19108-b31b1b)](https://arxiv.org/abs/2512.19108)
+[![GitHub Repo stars](https://img.shields.io/github/stars/Sweethyh/GaussianImage_plus.svg?style=social&label=Star&maxAge=60)](https://github.com/Sweethyh/GaussianImage_plus)
+
+[[paper](https://arxiv.org/abs/2512.19108)][[code](https://github.com/Xinjie-Q/GaussianImage)]
+
+[Tiantian Li](https://sweethyh.github.io/), [Xinjie Zhang](https://xinjie-q.github.io/), [Xingtong Ge](https://xingtongge.github.io/), [Tongda Xu](https://tongdaxu.github.io/), [Dailan He](https://scholar.google.com/citations?user=f5MTTy4AAAAJ&hl=en), [Jun Zhang](https://eejzhang.people.ust.hk/), [Yan Wang📧](https://yanwang202199.github.io/)
+
+(📧 denotes corresponding author.)
+
+This is the official implementation of our paper [GaussianImage++](https://arxiv.org/abs/2512.19108), accepted by AAAI 2026.
+
+
+
+## News
+
+* **2025/12/23**: 🔥 We release our Python and CUDA code for GaussianImage++ presented in our paper. Have a try! 
+<!-- Compared to the first version, we further improved the decoding speed of the GaussianImage codec to around 2000 FPS by removing the entropy coding operation, while only increasing the bpp overhead very slightly. -->
+
+* **2025/11/8**: 🌟 Our paper has been accepted by AAAI 2026! 🎉 Cheers!
+
+## Quick Started
+
+### Cloning the Repository
+
+The repository contains submodules, thus please check it out with 
+```shell
+# SSH
+git clone git@github.com:Sweethyh/GaussianImage_plus.git 
+```
+or
+```shell
+# HTTPS
+git clone https://github.com/Sweethyh/GaussianImage_plus.git 
+```
+After cloning the repository, you can follow these steps to train GaussianImage++ models under different tasks. 
+
 ### Requirements
 
 ```bash
@@ -8,46 +45,39 @@ cd ../
 pip install -r requirements.txt
 ```
 
-### Setup
+If you encounter errors while installing the packages listed in requirements.txt, you can try installing each Python package individually using the pip command.
 
-Organize your files as follows:
+Before training, you need to download the [kodak](https://r0k.us/graphics/kodak/) and [DIV2K-validation](https://data.vision.ee.ethz.ch/cvl/DIV2K/) datasets. The dataset folder is organized as follows.
 
-```kotlin
-HSI/
- ├── data/
- │    └── PaviaU.mat
- └── init/
+```bash
+├── dataset
+│   | kodak 
+│     ├── kodim01.png
+│     ├── kodim02.png 
+│     ├── ...
+│   | DIV2K_valid_HR
+│     ├── 0801.png
+│     ├── 0802.png
+│     ├── 0803.png
+│     ├── ...
 ```
 
-The `.mat` file contains hyperspectral image data.
+#### Representation
 
-The estimated coefficient basis matrix file will be automatically generated in `HSI/init/`.
+```bash
+python train.py --num_points 2500 --max_num_points 5000 --data_name kodak -d ./dataset/kodak/
+```
 
-The HSI fitting entrypoint is [train_hsi.py](train_hsi.py). The implementation keeps the cholesky projection path, Gabor rasterization, and LoRA fine-tuning of the endmember matrix E, while leaving out density control.
+#### Compression
 
-### Run demo
+```bash
+python train.py --num_points 2500 --max_num_points 5000 --data_name kodak -d ./dataset/kodak/ --color_norm 
 
-Run the following command to perform HSI fitting with Gabor splatting and LoRA endmember tuning on the *JasperRidge* dataset:
-
-```shell
-python train_hsi.py --dataset jasperridge --rank 10 --num_points 600 --iterations 8000 --num_gabor 2 --lora_rank 2 --lora_alpha 0.1
+python train_quantize.py --num_points 2500 --max_num_points 5000 --data_name kodak -d ./dataset/kodak/ --color_norm 
 ```
 
 ## Acknowledgments
 
-This implementation is developed based on the open-source project [GaussianImage](https://github.com/Xinjie-Q/GaussianImage), which provides the foundation for Gaussian splatting. We have modified and extended it for low-rank spectral modeling and hyperspectral image compression. We thank the original authors for their excellent work and for sharing their code.
+Our code was developed based on [GaussianImage](https://github.com/Xinjie-Q/GaussianImage). We thank them for providing the novel framework to implement image representation and compression.
 
-## Citation
-
-If you use our method or our code in your research, please kindly cite it:
-
-```latex
-@article{wang2025lorsgs,
-  title={LoR-SGS: Hyperspectral Image Compression via Low-Rank Spectral Gaussian Splatting},
-  author={Li, Tianyu and Wang, Ting and Zhao, Xile and Wang, Chao},
-  journal={IEEE Transactions on Geoscience and Remote Sensing},
-  year={2025},
-  publisher={IEEE}
-}
 ```
-

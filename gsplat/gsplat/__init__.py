@@ -3,9 +3,12 @@ import torch
 from .project_gaussians import project_gaussians
 from .rasterize import rasterize_gaussians
 from .project_gaussians_2d import project_gaussians_2d
+from .project_gaussians_2d_covariance import project_gaussians_2d_covariance  # ltt
 from .project_gaussians_2d_scale_rot import project_gaussians_2d_scale_rot
 from .rasterize_sum import rasterize_gaussians_sum
-from .rasterize_sum_gabor import rasterize_gabor_sum
+from .rasterize_sum_plus import rasterize_gaussians_plus
+from .rasterize_sum_gabor import rasterize_gabor_plus
+
 from .utils import (
     map_gaussian_to_intersects,
     bin_and_sort_gaussians,
@@ -20,9 +23,10 @@ import warnings
 
 __all__ = [
     "__version__",
-    "project_gaussians3d",
+    "project_gaussians",
     "project_gaussians_2d",
     "project_gaussians_2d_scale_rot",
+    "project_gaussians_2d_covariance", 
     "rasterize_gaussians",
     "rasterize_gaussians_sum",
     "spherical_harmonics",
@@ -36,6 +40,7 @@ __all__ = [
     "ProjectGaussians",
     "ProjectGaussians2d",
     "ProjectGaussians2dScaleRot",
+    "ProjectGaussians2d_covariance",
     "RasterizeGaussians",
     "RasterizeGaussiansSum",
     "BinAndSortGaussians",
@@ -159,7 +164,18 @@ class ProjectGaussians2dScaleRot(torch.autograd.Function):
     def backward(ctx: Any, *grad_outputs: Any) -> Any:
         raise NotImplementedError
 
+# class ProjectGaussians2d(torch.autograd.Function):
+#     @staticmethod
+#     def forward(ctx, *args, **kwargs):
+#         warnings.warn(
+#             "ProjectGaussians2d is deprecated, use project_gaussians_2d instead",
+#             DeprecationWarning,
+#         )
+#         return project_gaussians_2d(*args, **kwargs)
 
+#     @staticmethod
+#     def backward(ctx: Any, *grad_outputs: Any) -> Any:
+#         raise NotImplementedError
 class RasterizeGaussians(torch.autograd.Function):
     @staticmethod
     def forward(ctx, *args, **kwargs):
@@ -185,7 +201,7 @@ class RasterizeGaussiansSum(torch.autograd.Function):
     @staticmethod
     def backward(ctx: Any, *grad_outputs: Any) -> Any:
         raise NotImplementedError
-    
+
 class RasterizeGaborSum(torch.autograd.Function):
     @staticmethod
     def forward(ctx, *args, **kwargs):
@@ -193,7 +209,7 @@ class RasterizeGaborSum(torch.autograd.Function):
             "RasterizeGaborSum is deprecated, use rasterize_gaussians instead",
             DeprecationWarning,
         )
-        return rasterize_gabor_sum(*args, **kwargs)
+        return rasterize_gabor_plus(*args, **kwargs)
 
     @staticmethod
     def backward(ctx: Any, *grad_outputs: Any) -> Any:

@@ -6,7 +6,8 @@ import sys
 
 from setuptools import find_packages, setup
 
-__version__ = None
+# __version__ = None
+__version__='1.1.3'
 exec(open("gsplat/version.py", "r").read())
 
 URL = "https://github.com/nerfstudio-project/gsplat"  # TODO
@@ -14,7 +15,8 @@ URL = "https://github.com/nerfstudio-project/gsplat"  # TODO
 BUILD_NO_CUDA = os.getenv("BUILD_NO_CUDA", "0") == "1"
 WITH_SYMBOLS = os.getenv("WITH_SYMBOLS", "0") == "1"
 LINE_INFO = os.getenv("LINE_INFO", "0") == "1"
-
+# BUILD_NO_CUDA = 0
+print("BUILD_NO_CUDA", BUILD_NO_CUDA )
 
 def get_ext():
     from torch.utils.cpp_extension import BuildExtension
@@ -31,6 +33,7 @@ def get_extensions():
     sources = glob.glob(osp.join(extensions_dir, "*.cu")) + glob.glob(
         osp.join(extensions_dir, "*.cpp")
     )
+    print(sources)
     # sources = [
     #     osp.join(extensions_dir, "ext.cpp"),
     #     osp.join(extensions_dir, "rasterize.cu"),
@@ -74,6 +77,7 @@ def get_extensions():
     nvcc_flags = os.getenv("NVCC_FLAGS", "")
     nvcc_flags = [] if nvcc_flags == "" else nvcc_flags.split(" ")
     nvcc_flags += ["-O3", "--use_fast_math"]
+    # nvcc_flags += ["-g","-G"]# debug模式编译
     if LINE_INFO:
         nvcc_flags += ["-lineinfo"]
     if torch.version.hip:
@@ -95,6 +99,16 @@ def get_extensions():
         undef_macros=undef_macros,
         extra_compile_args=extra_compile_args,
         extra_link_args=extra_link_args,
+        
+        # library_dirs=[
+        #       '/home/litt2407/.conda/envs/c3/lib',
+        # '/home/litt2407/.conda/envs/c3/lib/python3.10/site-packages/torch/lib',
+        # # # '/home/litt2407/.conda/envs/c3/lib'
+        # # # '/NEW_EDS/JJ_Group/litt/conda/envs/py10/lib64',
+        # '/home/litt2407/.conda/envs/c3/targets/x86_64-linux/lib/'
+        
+        # ],
+        # libraries=['c10', 'c10_cuda', 'torch_cpu', 'torch_cuda_cu', 'torch_cuda_cpp', 'torch', 'torch_python', 'cudart'],
     )
 
     return [extension]
@@ -105,8 +119,8 @@ setup(
     version=__version__,
     description=" Python package for differentiable rasterization of gaussians",
     keywords="gaussian, splatting, cuda",
-    url=URL,
-    download_url=f"{URL}/archive/gsplat-{__version__}.tar.gz",
+    # url=URL,
+    # download_url=f"{URL}/archive/gsplat-{__version__}.tar.gz",
     python_requires=">=3.7",
     install_requires=[
         "jaxtyping",
@@ -129,8 +143,13 @@ setup(
             "ninja",
         ],
     },
-    ext_modules=get_extensions() if not BUILD_NO_CUDA else [],
-    cmdclass={"build_ext": get_ext()} if not BUILD_NO_CUDA else {},
+    # ext_modules=get_extensions() if not BUILD_NO_CUDA else [],
+    # cmdclass={"build_ext": get_ext()} if not BUILD_NO_CUDA else {},
+    # packages=find_packages(),
+    # # https://github.com/pypa/setuptools/issues/1461#issuecomment-954725244
+    # include_package_data=True,
+    ext_modules=get_extensions() ,
+    cmdclass={"build_ext": get_ext()} ,
     packages=find_packages(),
     # https://github.com/pypa/setuptools/issues/1461#issuecomment-954725244
     include_package_data=True,

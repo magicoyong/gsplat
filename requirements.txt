@@ -4,7 +4,10 @@ pandas
 pillow
 pytorch-msssim
 PyYAML
-scikit-learn
-scipy
 tqdm
 vector-quantize-pytorch
+wandb
+matplotlib
+opencv-python
+scikit-learn
+scipy

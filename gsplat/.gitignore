@@ -3,7 +3,7 @@ compile_commands.json
 
 # Visual Studio Code configs.
 .vscode/
-
+gsplat/cuda/csrc/third_party/glm/doc/
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -12,6 +12,10 @@ __pycache__/
 # C extensions
 *.so
 
+gsplat/cuda/csrc/CMakeFiles/
+
+# gsplat/cuda/csrc/third_party/
+workflows/
 # Distribution / packaging
 .Python
 build/
@@ -30,6 +34,7 @@ wheels/
 .installed.cfg
 *.egg
 MANIFEST
+warkflo
 
 # PyInstaller
 #  Usually these files are written by a python script from a template

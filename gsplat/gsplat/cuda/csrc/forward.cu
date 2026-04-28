@@ -11,9 +11,10 @@ namespace cg = cooperative_groups;
 // each thread processes one gaussian
 __global__ void project_gaussians_forward_kernel(
     const int num_points,
+    const float clip_coe,
     const float3* __restrict__ means3d,
     const float3* __restrict__ scales,
-    const float glob_scale,
+    const float glob_scale,//1
     const float4* __restrict__ quats,
     const float* __restrict__ viewmat,
     const float* __restrict__ projmat,
@@ -26,7 +27,8 @@ __global__ void project_gaussians_forward_kernel(
     float* __restrict__ depths,
     int* __restrict__ radii,
     float3* __restrict__ conics,
-    int32_t* __restrict__ num_tiles_hit
+    int32_t* __restrict__ num_tiles_hit,
+    float radius_clip
 ) {
     unsigned idx = cg::this_grid().thread_rank(); // idx of thread within grid
     if (idx >= num_points) {
@@ -52,32 +54,34 @@ __global__ void project_gaussians_forward_kernel(
     // printf("%d quat %.2f %.2f %.2f %.2f\n", idx, quat.w, quat.x, quat.y,
     // quat.z);
     float *cur_cov3d = &(covs3d[6 * idx]);
-    scale_rot_to_cov3d(scale, glob_scale, quat, cur_cov3d);
+    scale_rot_to_cov3d(scale, glob_scale, quat, cur_cov3d);// scale和四元组 得到3d协方差矩阵
 
     // project to 2d with ewa approximation
     float fx = intrins.x;
     float fy = intrins.y;
     float cx = intrins.z;
     float cy = intrins.w;
-    float tan_fovx = 0.5 * img_size.x / fx;
-    float tan_fovy = 0.5 * img_size.y / fy;
+    float tan_fovx = 0.5 * img_size.x / fx; //math.tan(0.5 * fov_x)
+    float tan_fovy = 0.5 * img_size.y / fy; //math.tan(0.5 * fov_x)*(h/w)
     float3 cov2d = project_cov3d_ewa(
         p_world, cur_cov3d, viewmat, fx, fy, tan_fovx, tan_fovy
     );
     // printf("cov2d %d, %.2f %.2f %.2f\n", idx, cov2d.x, cov2d.y, cov2d.z);
 
     float3 conic;
-    float radius;
-    bool ok = compute_cov2d_bounds(cov2d, conic, radius);
+    float2 radius;
+    bool ok = compute_cov2d_bounds(cov2d, conic, radius,clip_coe);
     if (!ok)
         return; // zero determinant
+    if (radius.y<radius_clip) //短轴不小于指定阈值， 否则会出现alias
+        return;
     // printf("conic %d %.2f %.2f %.2f\n", idx, conic.x, conic.y, conic.z);
     conics[idx] = conic;
 
-    // compute the projected mean
+    // compute the projected mean 并变换到图像的大小下 比3d gs多了一个乘以图像高宽的步骤
     float2 center = project_pix(projmat, p_world, img_size, {cx, cy});
     uint2 tile_min, tile_max;
-    get_tile_bbox(center, radius, tile_bounds, tile_min, tile_max);
+    get_tile_bbox(center, radius.x, tile_bounds, tile_min, tile_max);
     int32_t tile_area = (tile_max.x - tile_min.x) * (tile_max.y - tile_min.y);
     if (tile_area <= 0) {
         // printf("%d point bbox outside of bounds\n", idx);
@@ -86,7 +90,7 @@ __global__ void project_gaussians_forward_kernel(
 
     num_tiles_hit[idx] = tile_area;
     depths[idx] = p_view.z;
-    radii[idx] = (int)radius;
+    radii[idx] = (int)radius.x;
     xys[idx] = center;
     // printf(
     //     "point %d x %.2f y %.2f z %.2f, radius %d, # tiles %d, tile_min %d
@@ -133,6 +137,72 @@ __global__ void map_gaussian_to_intersects(
         }
     }
     // printf("point %d ending at %d\n", idx, cur_idx);
+}
+__global__ void map_gaussian_to_intersects(
+    const int num_points,
+
+    const float2* __restrict__ xys,
+    const float* __restrict__ depths,
+    const int* __restrict__ radii,
+    const int32_t* __restrict__ cum_tiles_hit,
+    const dim3 tile_bounds,
+    int64_t* __restrict__ isect_ids,
+    int32_t* __restrict__ gaussian_ids,
+    float radius_clip,
+    bool isprint
+) {
+    unsigned idx = cg::this_grid().thread_rank();// 高斯点索引
+    if (idx >= num_points) //
+        return;
+    // 添加调试输出
+    // if (isprint && (idx == 0)) {
+    //     printf("Radii at idx 0: %d\n", radii[0]);
+    // }
+    if (radii[idx] < radius_clip)
+        // if(isprint)
+        //     printf("idx %d has radius %d depth %d\n", idx, radii[idx],depths[idx]);
+        return;
+
+    // get the tile bbox for gaussian
+    uint2 tile_min, tile_max;
+    float2 center = xys[idx];
+    get_tile_bbox(center, radii[idx], tile_bounds, tile_min, tile_max);
+    //对于gaussian基元索引以在idx及之前的gaussian基元，总共影响了多少次tile，因为不同的gaussian基元会影响同一个tile
+    // update the intersection info for all tiles this gaussian hits
+    int32_t cur_idx = (idx == 0) ? 0 : cum_tiles_hit[idx - 1];//
+    // 同步所有线程
+    // __syncthreads();
+//     if (isprint) {
+//         printf("idx %d, tile_min (%d, %d), tile_max (%d, %d)\n", idx, tile_min.x, tile_min.y, tile_max.x, tile_max.y);
+//     }
+//     if (isprint){
+//         if ((idx<100 )){
+//             printf("point %d, curtile %d %d radius, min %d %d, max %d %d start at\n", idx, radii[idx],
+//             tile_min.x, tile_min.y, tile_max.x, tile_max.y,cur_idx);
+//         }
+//     }
+    // if (radii[idx] <= 0)
+    //     printf("point %d starting at %d\n", idx, cur_idx);
+    // 每个tile的大小是block的大小（16x16)
+    int64_t depth_id = (int64_t) * (int32_t *)&(depths[idx]);
+    for (int i = tile_min.y; i < tile_max.y; ++i) {
+        for (int j = tile_min.x; j < tile_max.x; ++j) {
+            // isect_id is tile ID and depth as int32
+            int64_t tile_id = i * tile_bounds.x + j; // tile within image
+            isect_ids[cur_idx] = (tile_id << 32) | depth_id; // tile | depth id
+            gaussian_ids[cur_idx] = idx;                     // 3D gaussian id 记录每个tile的gs id
+            ++cur_idx; // handles gaussians that hit more than one tile
+        }
+    }
+    // 再次同步线程以确保所有操作完成
+    // __syncthreads();
+//     if (isprint){
+//         if ((idx<100 )){
+//             printf("has iterated  %d gs \n", idx, cur_idx);
+//         }
+//     }
+    // if (radii[idx] <= 0)
+    //     printf("point %d ending at %d\n", idx, cur_idx);
 }
 
 // kernel to map sorted intersection IDs to tile bins
@@ -248,8 +318,138 @@ __global__ void nd_rasterize_forward(
 }
 
 
-
+// 3d splatting
 __global__ void rasterize_forward(
+    const dim3 tile_bounds,
+    const dim3 img_size,
+    const int32_t* __restrict__ gaussian_ids_sorted,
+    const int2* __restrict__ tile_bins,
+    const float2* __restrict__ xys,
+    const float3* __restrict__ conics,
+    const float3* __restrict__ colors,
+    const float* __restrict__ opacities,
+    float* __restrict__ final_Ts,
+    int* __restrict__ final_index,
+    float3* __restrict__ out_img,
+    const float3& __restrict__ background
+) {
+    // each thread draws one pixel, but also timeshares caching gaussians in a
+    // shared tile
+
+    auto block = cg::this_thread_block();
+    int32_t tile_id =
+        block.group_index().y * tile_bounds.x + block.group_index().x;
+    unsigned i =
+        block.group_index().y * block.group_dim().y + block.thread_index().y;
+    unsigned j =
+        block.group_index().x * block.group_dim().x + block.thread_index().x;
+
+    float px = (float)j;
+    float py = (float)i;
+    int32_t pix_id = i * img_size.x + j;
+
+    // return if out of bounds
+    // keep not rasterizing threads around for reading data
+    bool inside = (i < img_size.y && j < img_size.x);
+    bool done = !inside;
+
+    // have all threads in tile process the same gaussians in batches
+    // first collect gaussians between range.x and range.y in batches
+    // which gaussians to look through in this tile
+    int2 range = tile_bins[tile_id];
+    int num_batches = (range.y - range.x + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
+    __shared__ int32_t id_batch[BLOCK_SIZE];
+    __shared__ float3 xy_opacity_batch[BLOCK_SIZE];
+    __shared__ float3 conic_batch[BLOCK_SIZE];
+
+    // current visibility left to render
+    float T = 1.f;
+    // index of most recent gaussian to write to this thread's pixel
+    int cur_idx = 0;
+    uint32_t contributor = 0;
+	uint32_t last_contributor = 0;
+    // collect and process batches of gaussians
+    // each thread loads one gaussian at a time before rasterizing its
+    // designated pixel
+    int tr = block.thread_rank();
+    float3 pix_out = {0.f, 0.f, 0.f};
+    for (int b = 0; b < num_batches; ++b) {
+        // resync all threads before beginning next batch
+        // end early if entire tile is done
+        if (__syncthreads_count(done) >= BLOCK_SIZE) {
+            break;
+        }
+
+        // each thread fetch 1 gaussian from front to back
+        // index of gaussian to load
+        int batch_start = range.x + BLOCK_SIZE * b;
+        int idx = batch_start + tr;
+        if (idx < range.y) {
+            int32_t g_id = gaussian_ids_sorted[idx];
+            id_batch[tr] = g_id;
+            const float2 xy = xys[g_id];
+            const float opac = opacities[g_id];
+            xy_opacity_batch[tr] = {xy.x, xy.y, opac};
+            conic_batch[tr] = conics[g_id];
+        }
+
+        // wait for other threads to collect the gaussians in batch
+        block.sync();
+
+        // process gaussians in the current batch for this pixel
+        int batch_size = min(BLOCK_SIZE, range.y - batch_start);
+        for (int t = 0; (t < batch_size) && !done; ++t) {
+            contributor++;
+            const float3 conic = conic_batch[t];
+            const float3 xy_opac = xy_opacity_batch[t];
+            const float opac = xy_opac.z;
+            const float2 delta = {xy_opac.x - px, xy_opac.y - py};
+            const float sigma = 0.5f * (conic.x * delta.x * delta.x +
+                                        conic.z * delta.y * delta.y) +
+                                conic.y * delta.x * delta.y;
+            const float alpha = min(0.999f, opac * __expf(-sigma));
+            if (sigma < 0.f || alpha < 1.f / 255.f) {
+                continue;
+            }
+
+            const float next_T = T * (1.f - alpha);
+            if (next_T < 1e-4f) { // this pixel is done
+                // we want to render the last gaussian that contributes and note
+                // that here idx > range.x so we don't underflow
+                done = true;
+                break;
+            }
+
+            int32_t g = id_batch[t];
+            const float vis = alpha * T;
+            const float3 c = colors[g];
+            pix_out.x = pix_out.x + c.x * vis;
+            pix_out.y = pix_out.y + c.y * vis;
+            pix_out.z = pix_out.z + c.z * vis;
+            T = next_T;
+            cur_idx = batch_start + t;
+            last_contributor = contributor;
+        }
+    }
+
+    if (inside) {
+        // add background
+        final_Ts[pix_id] = T; // transmittance at last gaussian in this pixel
+        // final_index[pix_id] =  cur_idx; // index of in bin of last gaussian in this pixel xinjie
+        final_index[pix_id] = last_contributor; // index of in bin of last gaussian in this pixel
+
+        float3 final_color;
+        final_color.x = pix_out.x + T * background.x;
+        final_color.y = pix_out.y + T * background.y;
+        final_color.z = pix_out.z + T * background.z;
+        out_img[pix_id] = final_color;
+    }
+}
+
+
+
+__global__ void rasterize_forward_sum(
     const dim3 tile_bounds,
     const dim3 img_size,
     const int32_t* __restrict__ gaussian_ids_sorted,
@@ -336,28 +536,21 @@ __global__ void rasterize_forward(
             const float sigma = 0.5f * (conic.x * delta.x * delta.x +
                                         conic.z * delta.y * delta.y) +
                                 conic.y * delta.x * delta.y;
-            const float alpha = min(0.999f, opac * __expf(-sigma));
+            const float alpha = min(1.f, opac * __expf(-sigma));
             if (sigma < 0.f || alpha < 1.f / 255.f) {
                 continue;
             }
 
-            const float next_T = T * (1.f - alpha);
-            if (next_T <= 1e-4f) { // this pixel is done
-                // we want to render the last gaussian that contributes and note
-                // that here idx > range.x so we don't underflow
-                done = true;
-                break;
-            }
-
             int32_t g = id_batch[t];
-            const float vis = alpha * T;
+            const float vis = alpha;
             const float3 c = colors[g];
             pix_out.x = pix_out.x + c.x * vis;
             pix_out.y = pix_out.y + c.y * vis;
             pix_out.z = pix_out.z + c.z * vis;
-            T = next_T;
+            // T = next_T;
             cur_idx = batch_start + t;
         }
+        done = true;
     }
 
     if (inside) {
@@ -366,35 +559,33 @@ __global__ void rasterize_forward(
         final_index[pix_id] =
             cur_idx; // index of in bin of last gaussian in this pixel
         float3 final_color;
-        final_color.x = pix_out.x + T * background.x;
-        final_color.y = pix_out.y + T * background.y;
-        final_color.z = pix_out.z + T * background.z;
+        final_color.x = pix_out.x; //+ T * background.x;
+        final_color.y = pix_out.y; //+ T * background.y;
+        final_color.z = pix_out.z; //+ T * background.z;
         out_img[pix_id] = final_color;
     }
 }
 
-__global__ void rasterize_video_forward(
+//  ============================ours=========================
+__global__ void rasterize_sum_plus_forward( 
     const dim3 tile_bounds,
     const dim3 img_size,
-    const float time,
-    const float vis_thresold,
     const int32_t* __restrict__ gaussian_ids_sorted,
     const int2* __restrict__ tile_bins,
     const float2* __restrict__ xys,
     const float3* __restrict__ conics,
     const float3* __restrict__ colors,
     const float* __restrict__ opacities,
-    const float* __restrict__ means_t,
-    const float* __restrict__ lambda,
     float* __restrict__ final_Ts,
     int* __restrict__ final_index,
     float3* __restrict__ out_img,
-    const float3& __restrict__ background
+    const float3& __restrict__ background,
+    bool isprint
 ) {
     // each thread draws one pixel, but also timeshares caching gaussians in a
     // shared tile
 
-    auto block = cg::this_thread_block();
+    auto block = cg::this_thread_block();//当前线程属于的线程块
     int32_t tile_id =
         block.group_index().y * tile_bounds.x + block.group_index().x;
     unsigned i =
@@ -404,6 +595,7 @@ __global__ void rasterize_video_forward(
 
     float px = (float)j;
     float py = (float)i;
+    
     int32_t pix_id = i * img_size.x + j;
 
     // return if out of bounds
@@ -414,19 +606,17 @@ __global__ void rasterize_video_forward(
     // have all threads in tile process the same gaussians in batches
     // first collect gaussians between range.x and range.y in batches
     // which gaussians to look through in this tile
-    int2 range = tile_bins[tile_id];
+    int2 range = tile_bins[tile_id]; //当前处理的tile对应的 gaussian的起始id和结束id
     int num_batches = (range.y - range.x + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
     __shared__ int32_t id_batch[BLOCK_SIZE];
     __shared__ float3 xy_opacity_batch[BLOCK_SIZE];
-    __shared__ float2 time_batch[BLOCK_SIZE];
     __shared__ float3 conic_batch[BLOCK_SIZE];
 
     // current visibility left to render
     float T = 1.f;
     // index of most recent gaussian to write to this thread's pixel
     int cur_idx = 0;
-
     // collect and process batches of gaussians
     // each thread loads one gaussian at a time before rasterizing its
     // designated pixel
@@ -449,64 +639,56 @@ __global__ void rasterize_video_forward(
             const float2 xy = xys[g_id];
             const float opac = opacities[g_id];
             xy_opacity_batch[tr] = {xy.x, xy.y, opac};
-            time_batch[tr] = {lambda[g_id], means_t[g_id]};
             conic_batch[tr] = conics[g_id];
         }
 
         // wait for other threads to collect the gaussians in batch
         block.sync();
 
-        // process gaussians in the current batch for this pixel
+        // process gaussians in the current batch for this pixel  color渲染ltt
         int batch_size = min(BLOCK_SIZE, range.y - batch_start);
         for (int t = 0; (t < batch_size) && !done; ++t) {
             const float3 conic = conic_batch[t];
             const float3 xy_opac = xy_opacity_batch[t];
             const float opac = xy_opac.z;
-            const float2 time_params = time_batch[t];
-            const float3 delta = {xy_opac.x - px, xy_opac.y - py, time - time_params.y};
+            const float2 delta = {xy_opac.x - px, xy_opac.y - py};
             const float sigma = 0.5f * (conic.x * delta.x * delta.x +
                                         conic.z * delta.y * delta.y) +
                                 conic.y * delta.x * delta.y;
-        
-            const float decay = 0.5 * time_params.x * delta.z * delta.z;
-            const float alpha = min(0.999f, opac * __expf(-sigma-decay));
-            if (sigma < 0.f || alpha < 1.f / 255.f || decay > vis_thresold) {
+            const float alpha = min(1.f, opac * __expf(-sigma));//opca 固定为1
+            if (sigma < 0.f || alpha < 1.f / 255.f) {
                 continue;
             }
-
-            const float next_T = T * (1.f - alpha);
-            if (next_T <= 1e-4f) { // this pixel is done
-                // we want to render the last gaussian that contributes and note
-                // that here idx > range.x so we don't underflow
-                done = true;
-                break;
-            }
-
+       
             int32_t g = id_batch[t];
-            const float vis = alpha * T;
+            const float vis = alpha;
             const float3 c = colors[g];
             pix_out.x = pix_out.x + c.x * vis;
             pix_out.y = pix_out.y + c.y * vis;
             pix_out.z = pix_out.z + c.z * vis;
-            T = next_T;
             cur_idx = batch_start + t;
+            
+           
         }
+        done = true;
     }
+    
+    // if(isprint)
+    //     printf("tile %d, pixel %d %d %d gs points neg sigma %d low alpha %d\n", tile_id, i, j,cnt_gs,neg_sigma,low_alpha);
 
+    
+        
     if (inside) {
         // add background
         final_Ts[pix_id] = T; // transmittance at last gaussian in this pixel
-        final_index[pix_id] =
-            cur_idx; // index of in bin of last gaussian in this pixel
+        final_index[pix_id] =   cur_idx; // index of in bin of last gaussian in this pixel
         float3 final_color;
-        final_color.x = pix_out.x + T * background.x;
-        final_color.y = pix_out.y + T * background.y;
-        final_color.z = pix_out.z + T * background.z;
+        final_color.x = pix_out.x; //+ T * background.x;
+        final_color.y = pix_out.y; //+ T * background.y;
+        final_color.z = pix_out.z; //+ T * background.z;
         out_img[pix_id] = final_color;
     }
 }
-
-
 
 __global__ void rasterize_forward_sum_gabor(
     const dim3 tile_bounds,
@@ -667,23 +849,19 @@ __global__ void rasterize_forward_sum_gabor4(
     const float3* __restrict__ conics,
     const float4* __restrict__ colors,
     const float* __restrict__ opacities,
-    const float* __restrict__ gabor_freqs_x, //[N, F]
+    const float* __restrict__ gabor_freqs_x,
     const float* __restrict__ gabor_freqs_y,
     const float* __restrict__ gabor_weights,
     const int num_freqs,
-    // ouput
     float* __restrict__ final_Ts,
     int* __restrict__ final_index,
     float4* __restrict__ out_img,
     const float4& __restrict__ background
 ) {
     auto block = cg::this_thread_block();
-    int32_t tile_id =
-        block.group_index().y * tile_bounds.x + block.group_index().x;
-    unsigned i =
-        block.group_index().y * block.group_dim().y + block.thread_index().y;
-    unsigned j =
-        block.group_index().x * block.group_dim().x + block.thread_index().x;
+    int32_t tile_id = block.group_index().y * tile_bounds.x + block.group_index().x;
+    unsigned i = block.group_index().y * block.group_dim().y + block.thread_index().y;
+    unsigned j = block.group_index().x * block.group_dim().x + block.thread_index().x;
 
     float px = (float)j;
     float py = (float)i;
@@ -698,10 +876,10 @@ __global__ void rasterize_forward_sum_gabor4(
     __shared__ int32_t id_batch[BLOCK_SIZE];
     __shared__ float3 xy_opacity_batch[BLOCK_SIZE];
     __shared__ float3 conic_batch[BLOCK_SIZE];
+    __shared__ float4 color_batch[BLOCK_SIZE];
 
     float T = 1.f;
     int cur_idx = 0;
-
     int tr = block.thread_rank();
     float4 pix_out = {0.f, 0.f, 0.f, 0.f};
     for (int b = 0; b < num_batches; ++b) {
@@ -718,6 +896,7 @@ __global__ void rasterize_forward_sum_gabor4(
             const float opac = opacities[g_id];
             xy_opacity_batch[tr] = {xy.x, xy.y, opac};
             conic_batch[tr] = conics[g_id];
+            color_batch[tr] = colors[g_id];
         }
 
         block.sync();
@@ -735,15 +914,12 @@ __global__ void rasterize_forward_sum_gabor4(
 
             float weights_sum = 0.f;
             float cos_sum = 0.f;
-
             for (int f = 0; f < num_freqs; ++f) {
                 int32_t g = id_batch[t];
                 int g_idx = g * num_freqs + f;
-
                 float fx = gabor_freqs_x[g_idx];
                 float fy = gabor_freqs_y[g_idx];
                 float w = gabor_weights[g_idx];
-
                 weights_sum += w;
                 float theta = delta.x * fx + delta.y * fy;
                 cos_sum += w * __cosf(theta);
@@ -755,13 +931,11 @@ __global__ void rasterize_forward_sum_gabor4(
                 continue;
             }
 
-            int32_t g = id_batch[t];
-            const float vis = alpha;
-            const float4 c = colors[g];
-            pix_out.x = pix_out.x + c.x * vis;
-            pix_out.y = pix_out.y + c.y * vis;
-            pix_out.z = pix_out.z + c.z * vis;
-            pix_out.w = pix_out.w + c.w * vis;
+            const float4 c = color_batch[t];
+            pix_out.x += c.x * alpha;
+            pix_out.y += c.y * alpha;
+            pix_out.z += c.z * alpha;
+            pix_out.w += c.w * alpha;
             cur_idx = batch_start + t;
         }
         done = true;
@@ -779,125 +953,8 @@ __global__ void rasterize_forward_sum_gabor4(
     }
 }
 
-__global__ void rasterize_forward_sum(
-    const dim3 tile_bounds,
-    const dim3 img_size,
-    const int32_t* __restrict__ gaussian_ids_sorted,
-    const int2* __restrict__ tile_bins,  //存储该tile内高斯的范围
-    const float2* __restrict__ xys,
-    const float3* __restrict__ conics,
-    const float3* __restrict__ colors,
-    const float* __restrict__ opacities,
-    // ouput
-    float* __restrict__ final_Ts,
-    int* __restrict__ final_index,
-    float3* __restrict__ out_img, 
-    const float3& __restrict__ background
-) {
-    // each thread draws one pixel, but also timeshares caching gaussians in a
-    // shared tile
 
-    auto block = cg::this_thread_block();
-    int32_t tile_id =
-        block.group_index().y * tile_bounds.x + block.group_index().x;
-    unsigned i =
-        block.group_index().y * block.group_dim().y + block.thread_index().y;
-    unsigned j =
-        block.group_index().x * block.group_dim().x + block.thread_index().x;
-
-    float px = (float)j;
-    float py = (float)i;
-    int32_t pix_id = i * img_size.x + j;
-
-    // return if out of bounds
-    // keep not rasterizing threads around for reading data
-    bool inside = (i < img_size.y && j < img_size.x);
-    bool done = !inside;
-
-    // have all threads in tile process the same gaussians in batches
-    // first collect gaussians between range.x and range.y in batches
-    // which gaussians to look through in this tile
-    int2 range = tile_bins[tile_id];
-    int num_batches = (range.y - range.x + BLOCK_SIZE - 1) / BLOCK_SIZE;
-
-    __shared__ int32_t id_batch[BLOCK_SIZE];
-    __shared__ float3 xy_opacity_batch[BLOCK_SIZE];
-    __shared__ float3 conic_batch[BLOCK_SIZE];
-
-    // current visibility left to render
-    float T = 1.f;
-    // index of most recent gaussian to write to this thread's pixel
-    int cur_idx = 0;
-
-    // collect and process batches of gaussians
-    // each thread loads one gaussian at a time before rasterizing its
-    // designated pixel
-    int tr = block.thread_rank();
-    float3 pix_out = {0.f, 0.f, 0.f};
-    for (int b = 0; b < num_batches; ++b) {
-        // resync all threads before beginning next batch
-        // end early if entire tile is done
-        if (__syncthreads_count(done) >= BLOCK_SIZE) {
-            break;
-        }
-
-        // each thread fetch 1 gaussian from front to back
-        // index of gaussian to load
-        int batch_start = range.x + BLOCK_SIZE * b;
-        int idx = batch_start + tr;
-        if (idx < range.y) {
-            int32_t g_id = gaussian_ids_sorted[idx];
-            id_batch[tr] = g_id;
-            const float2 xy = xys[g_id];
-            const float opac = opacities[g_id];
-            xy_opacity_batch[tr] = {xy.x, xy.y, opac};
-            conic_batch[tr] = conics[g_id];
-        }
-
-        // wait for other threads to collect the gaussians in batch
-        block.sync();
-
-        // process gaussians in the current batch for this pixel
-        int batch_size = min(BLOCK_SIZE, range.y - batch_start);
-        for (int t = 0; (t < batch_size) && !done; ++t) {
-            const float3 conic = conic_batch[t];
-            const float3 xy_opac = xy_opacity_batch[t];
-            const float opac = xy_opac.z;
-            const float2 delta = {xy_opac.x - px, xy_opac.y - py};
-            const float sigma = 0.5f * (conic.x * delta.x * delta.x +
-                                        conic.z * delta.y * delta.y) +
-                                conic.y * delta.x * delta.y;
-            const float alpha = min(1.f, opac * __expf(-sigma));
-            if (sigma < 0.f || alpha < 1.f / 255.f) {
-                continue;
-            }
-
-            int32_t g = id_batch[t];
-            const float vis = alpha;
-            const float3 c = colors[g];
-            pix_out.x = pix_out.x + c.x * vis;
-            pix_out.y = pix_out.y + c.y * vis;
-            pix_out.z = pix_out.z + c.z * vis;
-            // T = next_T;
-            cur_idx = batch_start + t;
-        }
-        //done = true;
-    }
-
-    if (inside) {
-        // add background
-        final_Ts[pix_id] = T; // transmittance at last gaussian in this pixel
-        final_index[pix_id] =
-            cur_idx; // index of in bin of last gaussian in this pixel
-        float3 final_color;
-        final_color.x = pix_out.x; //+ T * background.x;
-        final_color.y = pix_out.y; //+ T * background.y;
-        final_color.z = pix_out.z; //+ T * background.z;
-        out_img[pix_id] = final_color;
-    }
-}
-
-__global__ void nd_rasterize_forward_sum(
+__global__ void nd_rasterize_forward_gs_sum(
     const dim3 tile_bounds,
     const dim3 img_size,
     const unsigned channels,
@@ -976,6 +1033,127 @@ __global__ void nd_rasterize_forward_sum(
             : idx; // index of in bin of last gaussian in this pixel
     // for (int c = 0; c < channels; ++c) {
     //     out_img[channels * pix_id + c] += T * background[c];
+    // }
+}
+
+
+__global__ void nd_rasterize_forward_sum(
+    const dim3 tile_bounds,
+    const dim3 img_size,
+    const unsigned channels,// 要渲染的通道个数
+    const int32_t* __restrict__ gaussian_ids_sorted,
+    const int2* __restrict__ tile_bins,
+    const float2* __restrict__ xys,
+    const float3* __restrict__ conics,
+    const float* __restrict__ colors,
+    const float* __restrict__ opacities,
+    float* __restrict__ final_Ts,
+    int* __restrict__ final_index,
+    float* __restrict__ out_img,
+    const float* __restrict__ background
+) {
+    // current naive implementation where tile data loading is redundant
+    // TODO tile data should be shared between tile threads
+    auto block = cg::this_thread_block();
+    int32_t tile_id = blockIdx.y * tile_bounds.x + blockIdx.x;
+    unsigned i = blockIdx.y * blockDim.y + threadIdx.y;
+    unsigned j = blockIdx.x * blockDim.x + threadIdx.x;
+    float px = (float)j;
+    float py = (float)i;
+    int32_t pix_id = i * img_size.x + j;
+    bool inside = (i < img_size.y && j < img_size.x);
+    bool done = !inside;
+    if (done) { return;}
+    // return if out of bounds
+    
+    // which gaussians to look through in this tile
+    int2 range = tile_bins[tile_id];
+    if (range.x >= range.y) {
+        return;  // No data for this tile, skip processing
+    }
+    // todo 添加共享内存 提高执行速度
+    int num_batches = (range.y - range.x + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    __shared__ int32_t id_batch[BLOCK_SIZE];
+    __shared__ float3 xy_opacity_batch[BLOCK_SIZE];
+    __shared__ float3 conic_batch[BLOCK_SIZE];
+    __shared__ float color_batch[BLOCK_SIZE][MAX_REGISTER_CHANNELS];
+    // iterate over all gaussians and apply rendering EWA equation (e.q. 2 from
+    // paper)
+    float T = 1.f;
+    int cur_idx = 0;
+    float temp_color[MAX_REGISTER_CHANNELS] = {0.0f};  // 临时存储累加的颜色值
+    int tr = block.thread_rank();
+    for (int b = 0; b < num_batches; ++b) {
+        // each thread fetch 1 gaussian from front to back
+        // index of gaussian to load
+        int batch_start = range.x + BLOCK_SIZE * b;
+        int idx = batch_start + tr;
+        if (idx < range.y) {
+            int32_t g_id = gaussian_ids_sorted[idx];
+            id_batch[tr] = g_id;
+            const float2 xy = xys[g_id];
+            const float opac = opacities[g_id];
+            xy_opacity_batch[tr] = {xy.x, xy.y, opac};
+            conic_batch[tr] = conics[g_id];
+            // color_batch[tr] = colors[g_id];
+
+            const float* cur_color = &colors[g_id * channels];  // 计算颜色的起始位置
+
+            // 加载颜色数据到共享内存
+            for (int c = 0; c < channels; ++c) {
+                color_batch[tr][c] = cur_color[c];
+            }
+
+        }
+
+        // wait for other threads to collect the gaussians in batch
+        block.sync();
+
+        // process gaussians in the current batch for this pixel
+        int batch_size = min(BLOCK_SIZE, range.y - batch_start);
+        for (int t = 0; (t < batch_size) && !done; ++t) {
+            // contributor++;
+            const float3 conic = conic_batch[t];
+            const float3 xy_opac = xy_opacity_batch[t];
+            const float opac = xy_opac.z;
+            const float * cur_color = &color_batch[t][0]; // 从共享内存中获取颜色
+            const float2 delta = {xy_opac.x - px, xy_opac.y - py};
+            const float sigma = 0.5f * (conic.x * delta.x * delta.x +
+                                        conic.z * delta.y * delta.y) +
+                                conic.y * delta.x * delta.y;
+            const float alpha = min(0.999f, opac * __expf(-sigma));
+            if (sigma < 0.f || alpha < 1.f / 255.f) {
+                continue;
+            }
+
+            int32_t g = id_batch[t];
+            for (int c = 0; c < channels; ++c) {
+                temp_color[c] += cur_color[c] * alpha;
+            }
+            // T = next_T;
+            cur_idx = batch_start + t;
+            // last_contributor = contributor;
+        }
+        // done=True;
+         // // resync all threads before beginning next batch
+        // // end early if entire tile is done
+        if (__syncthreads_count(done) >= BLOCK_SIZE) {
+            break;
+        }
+    }
+    if (inside) {
+        // add background
+        final_Ts[pix_id] = T; // transmittance at last gaussian in this pixel
+        // final_index[pix_id] =  cur_idx; // index of in bin of last gaussian in this pixel xinjie
+        final_index[pix_id] = range.y - 1;; // index of in bin of last gaussian in this pixel
+        for (int c = 0; c < channels; ++c) {
+            out_img[channels * pix_id + c]  += temp_color[c]; // 批量写回
+        }
+    }
+    // final_index[pix_id] =
+    //     (idx == range.y)? idx - 1    : idx; // index of in bin of last gaussian in this pixel
+    // // for (int c = 0; c < channels; ++c) {
+    // //     out_img[channels * pix_id + c] += T * background[c];
     // }
 }
 
@@ -1083,6 +1261,7 @@ __global__ void rasterize_forward_sum_general(
             // T = next_T;
             cur_idx = batch_start + t;
         }
+        done = true;
     }
 
     if (inside) {
@@ -1097,6 +1276,7 @@ __global__ void rasterize_forward_sum_general(
         out_img[pix_id] = final_color;
     }
 }
+
 
 // device helper to approximate projected 2d cov from 3d mean and cov
 __device__ float3 project_cov3d_ewa(
@@ -1135,17 +1315,11 @@ __device__ float3 project_cov3d_ewa(
     float rz2 = rz * rz;
 
     // column major
-    // we only care about the top 2x2 submatrix
-    glm::mat3 J = glm::mat3(
-        fx * rz,
-        0.f,
-        0.f,
-        0.f,
-        fy * rz,
-        0.f,
-        -fx * t.x * rz2,
-        -fy * t.y * rz2,
-        0.f
+    // we only care about the top 2x2 submatrix,
+    glm::mat3 J = glm::mat3( // 是原来3G GS里面的J的转置
+        fx * rz, 0.f, 0.f,
+        0.f,  fy * rz,  0.f,
+        -fx * t.x * rz2, -fy * t.y * rz2, 0.f
     );
     glm::mat3 T = J * W;
 
@@ -1189,3 +1363,5 @@ __device__ void scale_rot_to_cov3d(
     cov3d[4] = tmp[1][2];
     cov3d[5] = tmp[2][2];
 }
+
+

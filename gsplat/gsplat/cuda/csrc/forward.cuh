@@ -2,9 +2,11 @@
 #include <cuda_runtime.h>
 #include <cstdint>
 
+
 // compute the 2d gaussian parameters from 3d gaussian parameters
 __global__ void project_gaussians_forward_kernel(
     const int num_points,
+    const float clip_coe,
     const float3* __restrict__ means3d,
     const float3* __restrict__ scales,
     const float glob_scale,
@@ -20,7 +22,8 @@ __global__ void project_gaussians_forward_kernel(
     float* __restrict__ depths,
     int* __restrict__ radii,
     float3* __restrict__ conics,
-    int32_t* __restrict__ num_tiles_hit
+    int32_t* __restrict__ num_tiles_hit,
+    float radius_clip
 );
 
 // compute output color image from binned and sorted gaussians
@@ -71,7 +74,21 @@ __global__ void nd_rasterize_forward_sum(
     float* __restrict__ out_img,
     const float* __restrict__ background
 );
-
+__global__ void nd_rasterize_forward_gs_sum(
+    const dim3 tile_bounds,
+    const dim3 img_size,
+    const unsigned channels,
+    const int32_t* __restrict__ gaussian_ids_sorted,
+    const int2* __restrict__ tile_bins,
+    const float2* __restrict__ xys,
+    const float3* __restrict__ conics,
+    const float* __restrict__ colors,
+    const float* __restrict__ opacities,
+    float* __restrict__ final_Ts,
+    int* __restrict__ final_index,
+    float* __restrict__ out_img,
+    const float* __restrict__ background
+); 
 // device helper to approximate projected 2d cov from 3d mean and cov
 __device__ float3 project_cov3d_ewa(
     const float3 &mean3d,
@@ -96,8 +113,11 @@ __global__ void map_gaussian_to_intersects(
     const int32_t* __restrict__ cum_tiles_hit,
     const dim3 tile_bounds,
     int64_t* __restrict__ isect_ids,
-    int32_t* __restrict__ gaussian_ids
+    int32_t* __restrict__ gaussian_ids,
+    float radius_clip,
+    bool isprint
 );
+
 
 __global__ void get_tile_bin_edges(
     const int num_intersects, const int64_t* __restrict__ isect_ids_sorted, int2* __restrict__ tile_bins
@@ -131,6 +151,23 @@ __global__ void rasterize_forward_sum(
     int* __restrict__ final_index,
     float3* __restrict__ out_img,
     const float3& __restrict__ background
+);
+
+//  =============== ours ======================
+__global__ void rasterize_sum_plus_forward( // accumulate sum render
+    const dim3 tile_bounds,
+    const dim3 img_size,
+    const int32_t* __restrict__ gaussian_ids_sorted,
+    const int2* __restrict__ tile_bins,
+    const float2* __restrict__ xys,
+    const float3* __restrict__ conics,
+    const float3* __restrict__ colors,
+    const float* __restrict__ opacities,
+    float* __restrict__ final_Ts,
+    int* __restrict__ final_index,
+    float3* __restrict__ out_img,
+    const float3& __restrict__ background,
+    bool isprint
 );
 
 __global__ void rasterize_forward_sum_gabor(
@@ -171,7 +208,6 @@ __global__ void rasterize_forward_sum_gabor4(
     const float4& __restrict__ background
 );
 
-
 __global__ void rasterize_forward_sum_general(
     const dim3 tile_bounds,
     const dim3 img_size,
@@ -188,37 +224,5 @@ __global__ void rasterize_forward_sum_general(
     const float3& __restrict__ background
 );
 
-__global__ void nd_rasterize_forward(
-    const dim3 tile_bounds,
-    const dim3 img_size,
-    const unsigned channels,
-    const int32_t* __restrict__ gaussian_ids_sorted,
-    const int2* __restrict__ tile_bins,
-    const float2* __restrict__ xys,
-    const float3* __restrict__ conics,
-    const float* __restrict__ colors,
-    const float* __restrict__ opacities,
-    float* __restrict__ final_Ts,
-    int* __restrict__ final_index,
-    float* __restrict__ out_img,
-    const float* __restrict__ background
-);
 
-__global__ void rasterize_video_forward(
-    const dim3 tile_bounds,
-    const dim3 img_size,
-    const float time,
-    const float vis_thresold,
-    const int32_t* __restrict__ gaussian_ids_sorted,
-    const int2* __restrict__ tile_bins,
-    const float2* __restrict__ xys,
-    const float3* __restrict__ conics,
-    const float3* __restrict__ colors,
-    const float* __restrict__ opacities,
-    const float* __restrict__ means_t,
-    const float* __restrict__ lambda,
-    float* __restrict__ final_Ts,
-    int* __restrict__ final_index,
-    float3* __restrict__ out_img,
-    const float3& __restrict__ background
-);
+
